@@ -2,11 +2,39 @@ import torch
 import torch.nn.functional as F
 import cv2 as cv
 import numpy as np
-import os
-from glob import glob
+from pathlib import Path
 from icecream import ic
 from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
+import imageio as iio
+from PIL import Image
+
+def installed_memory():
+    """ Kinda hacky way to read how much RAM is installed on the machine using only Python standard libraries...
+     (Better way would be to use psutil)
+
+     Returns the amount of RAM installed, in bytes.
+     """
+    import platform
+    s = platform.system().lower()
+    if 'windows' in s:
+        import subprocess
+        ret = subprocess.run(['wmic', 'memorychip', 'get', 'capacity'], capture_output=True).stdout.split()[1:]
+        mem_bytes = sum([int(b) for b in ret])
+    elif 'linux' in s:
+        import os
+        mem_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+    elif 'darwin' in s:
+        import subprocess
+        import string
+        ret = subprocess.run(['top', '-l', '1', '-s', '0'], capture_output=True, text=True).stdout.splitlines()
+        row = next(r for r in ret if r.startswith('PhysMem'))
+        used_mem = int(row.split('used')[0].strip(string.ascii_letters+' '+string.punctuation))
+        unused_mem = int(row.split('unused')[-2].split()[-1].strip(string.ascii_letters))
+        mem_bytes = (used_mem + unused_mem) * 1049000   # 1.049e+6 bytes per MiB
+    else:
+        mem_bytes = 0
+    return mem_bytes
 
 
 # This function is borrowed from IDR: https://github.com/lioryariv/idr
@@ -38,23 +66,46 @@ class Dataset:
     def __init__(self, conf):
         super(Dataset, self).__init__()
         print('Load data: Begin')
-        self.device = torch.device('cuda')
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         self.conf = conf
 
-        self.data_dir = conf.get_string('data_dir')
+        self.data_dir = Path(conf.get_string('data_dir'))
+        self.cache_dir = Path(conf.get_string('cache_dir'))
         self.render_cameras_name = conf.get_string('render_cameras_name')
         self.object_cameras_name = conf.get_string('object_cameras_name')
+        self.image_format = conf.get_string('image_format').strip('. ')
+        self.mask_format = conf.get_string('mask_format').strip('. ')
 
         self.camera_outside_sphere = conf.get_bool('camera_outside_sphere', default=True)
         self.scale_mat_scale = conf.get_float('scale_mat_scale', default=1.1)
 
-        camera_dict = np.load(os.path.join(self.data_dir, self.render_cameras_name))
+        camera_dict = np.load(self.data_dir / self.render_cameras_name)
         self.camera_dict = camera_dict
-        self.images_lis = sorted(glob(os.path.join(self.data_dir, 'image/*.png')))
+
+        self.images_lis = sorted((self.data_dir / 'image').glob(f'*.{self.image_format}'))
+        self.masks_lis = sorted((self.data_dir / 'mask').glob(f'*.{self.mask_format}'))
+
         self.n_images = len(self.images_lis)
-        self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
-        self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
-        self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
+        self.n_masks = len(self.masks_lis)
+
+        with iio.imopen(self.images_lis[0], "r") as probe:
+            imshape = probe.read().shape
+
+        size_alloc = np.prod(imshape) * (self.n_images + self.n_masks) * 4       # 4 bytes per np.float32
+        if size_alloc >= installed_memory():
+            print('Not enough RAM, using disk-mapped arrays.')
+            self.images_np = np.memmap((self.cache_dir / '_cache_images.dat').as_posix(),
+                                       dtype='float32', mode='w+', shape=(self.n_images, *imshape))
+            self.masks_np = np.memmap((self.cache_dir / '_cache_masks.dat').as_posix(),
+                                      dtype='float32', mode='w+', shape=(self.n_masks, *imshape))
+        else:
+            self.images_np = np.zeros((self.n_images, *imshape), dtype=np.float32)
+            self.masks_np = np.zeros((self.n_images, *imshape), dtype=np.float32)
+
+        for i, img_name in enumerate(self.images_lis):
+            self.images_np[i, ...] = np.array(Image.open(img_name, formats=[self.image_format]), dtype=np.float32) / 256.0
+        for m, mask_name in enumerate(self.masks_lis):
+            self.masks_np[m, ...] = np.array(Image.open(mask_name, formats=[self.mask_format]), dtype=np.float32) / 256.0
 
         # world_mat is a projection matrix from world to image
         self.world_mats_np = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
@@ -75,7 +126,7 @@ class Dataset:
             self.pose_all.append(torch.from_numpy(pose).float())
 
         self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
-        self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
+        self.masks = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()    # [n_images, H, W, 3]
         self.intrinsics_all = torch.stack(self.intrinsics_all).to(self.device)   # [n_images, 4, 4]
         self.intrinsics_all_inv = torch.inverse(self.intrinsics_all)  # [n_images, 4, 4]
         self.focal = self.intrinsics_all[0][0, 0]
@@ -166,6 +217,6 @@ class Dataset:
         return near, far
 
     def image_at(self, idx, resolution_level):
-        img = cv.imread(self.images_lis[idx])
+        img = cv.imread(self.images_lis[idx].as_posix())
         return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))).clip(0, 255)
 
