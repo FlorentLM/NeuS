@@ -7,11 +7,9 @@ from icecream import ic
 from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
 import imageio as iio
-from PIL import Image
-import logging
-logging.getLogger('PIL').setLevel(logging.WARNING)
 
-def installed_memory():
+
+def get_system_ram():
     """ Kinda hacky way to read how much RAM is installed on the machine using only Python standard libraries...
      (Better way would be to use psutil)
 
@@ -37,6 +35,13 @@ def installed_memory():
     else:
         mem_bytes = 0
     return mem_bytes
+
+
+def get_system_vram():
+    """
+    Returns the amount of VRAM installed, in bytes.
+    """
+    return torch.cuda.get_device_properties(0).total_memory
 
 
 # This function is borrowed from IDR: https://github.com/lioryariv/idr
@@ -94,7 +99,7 @@ class Dataset:
             imshape = probe.read().shape
 
         size_alloc = np.prod(imshape).astype(np.uint64) * (self.n_images + self.n_masks) * 4       # 4 bytes per np.float32
-        if size_alloc >= installed_memory() // 2:
+        if size_alloc >= get_system_vram() or size_alloc >= get_system_ram() // 2:
             print('Not enough RAM, using disk-mapped arrays.')
             self.images_np = np.memmap((self.cache_dir / '_cache_images.dat').as_posix(),
                                        dtype='float32', mode='w+', shape=(self.n_images, *imshape))
