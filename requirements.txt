@@ -1,9 +1,14 @@
+--find-links https://download.pytorch.org/whl/torch_stable.html
+
 trimesh==3.9.8
 numpy==1.19.2
 pyhocon==0.3.57
 icecream==2.1.0
 opencv_python==4.5.2.52
 tqdm==4.50.2
-torch==1.8.0
+torch==1.8.0+cu111
 scipy==1.7.0
 PyMCubes==0.1.2
+imageio==2.31.1
+scikit-image==0.19.3
+tensorboard==2.11.2
