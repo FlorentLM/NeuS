@@ -8,6 +8,8 @@ from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
 import imageio as iio
 from PIL import Image
+import logging
+logging.getLogger('PIL').setLevel(logging.WARNING)
 
 def installed_memory():
     """ Kinda hacky way to read how much RAM is installed on the machine using only Python standard libraries...
@@ -91,8 +93,8 @@ class Dataset:
         with iio.imopen(self.images_lis[0], "r") as probe:
             imshape = probe.read().shape
 
-        size_alloc = np.prod(imshape) * (self.n_images + self.n_masks) * 4       # 4 bytes per np.float32
-        if size_alloc >= installed_memory():
+        size_alloc = np.prod(imshape).astype(np.uint64) * (self.n_images + self.n_masks) * 4       # 4 bytes per np.float32
+        if size_alloc >= installed_memory() // 2:
             print('Not enough RAM, using disk-mapped arrays.')
             self.images_np = np.memmap((self.cache_dir / '_cache_images.dat').as_posix(),
                                        dtype='float32', mode='w+', shape=(self.n_images, *imshape))
@@ -103,9 +105,9 @@ class Dataset:
             self.masks_np = np.zeros((self.n_images, *imshape), dtype=np.float32)
 
         for i, img_name in enumerate(self.images_lis):
-            self.images_np[i, ...] = np.array(Image.open(img_name, formats=[self.image_format]), dtype=np.float32) / 256.0
+            self.images_np[i, ...] = np.array(cv.imread(img_name.as_posix()), dtype=np.float32) / 256.0
         for m, mask_name in enumerate(self.masks_lis):
-            self.masks_np[m, ...] = np.array(Image.open(mask_name, formats=[self.mask_format]), dtype=np.float32) / 256.0
+            self.masks_np[m, ...] = np.array(cv.imread(mask_name.as_posix()), dtype=np.float32) / 256.0
 
         # world_mat is a projection matrix from world to image
         self.world_mats_np = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
@@ -137,7 +139,7 @@ class Dataset:
         object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
         object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
         # Object scale mat: region of interest to **extract mesh**
-        object_scale_mat = np.load(os.path.join(self.data_dir, self.object_cameras_name))['scale_mat_0']
+        object_scale_mat = np.load(self.data_dir / self.object_cameras_name)['scale_mat_0']
         object_bbox_min = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_min[:, None]
         object_bbox_max = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_max[:, None]
         self.object_bbox_min = object_bbox_min[:3, 0]

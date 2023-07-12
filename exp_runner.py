@@ -5,6 +5,7 @@ import argparse
 import numpy as np
 import cv2 as cv
 import trimesh
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
@@ -23,15 +24,14 @@ class Runner:
 
         # Configuration
         self.conf_path = conf_path
-        f = open(self.conf_path)
-        conf_text = f.read()
+        with open(self.conf_path, 'r') as f:
+            conf_text = f.read()
         conf_text = conf_text.replace('CASE_NAME', case)
-        f.close()
 
         self.conf = ConfigFactory.parse_string(conf_text)
-        self.conf['dataset.data_dir'] = self.conf['dataset.data_dir'].replace('CASE_NAME', case)
-        self.base_exp_dir = self.conf['general.base_exp_dir']
-        os.makedirs(self.base_exp_dir, exist_ok=True)
+        # self.conf['dataset.data_dir'] = self.conf['dataset.data_dir'].replace('CASE_NAME', case)
+        self.base_exp_dir = Path(self.conf['general.base_exp_dir'])
+        self.base_exp_dir.mkdir(parents=True, exist_ok=True)
         self.dataset = Dataset(self.conf['dataset'])
         self.iter_step = 0
 
